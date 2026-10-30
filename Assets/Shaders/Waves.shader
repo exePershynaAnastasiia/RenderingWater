@@ -7,16 +7,10 @@ Shader "Custom/Waves"
         _MainTex ("Albedo (RGB)", 2D) = "white" {}
         _Glossiness ("Smoothness", Range(0,1)) = 0.5
         _Metallic ("Metallic", Range(0,1)) = 0.0
-
         
-        _Wave1 ("Wave 1: Amplitude, Wavelength, Speed", Vector) = (0.25, 4, 1, 0)
-        _Wave2 ("Wave 2: Amplitude, Wavelength, Speed", Vector) = (0.12, 2, 0.7, 0)
-        _Wave3 ("Wave 3: Amplitude, Wavelength, Speed", Vector) = (0.06, 1, 1.3, 0)
-
-        _Direction1 ("Wave 1 Direction", Vector) = (1, 0, 0, 0)
-        _Direction2 ("Wave 2 Direction", Vector) = (0.5, 1, 0, 0)
-        _Direction3 ("Wave 3 Direction", Vector) = (-1, 0.3, 0, 0)
-
+        _WaveA ("Wave A (Direction XY, Steepness, Wavelength)", Vector) = (1, 0, 0.5, 10)
+        _WaveB ("Wave B", Vector) = (0, 1, 0.25, 20)
+        _WaveC ("Wave C", Vector) = (1, 1, 0.15, 10)
     }
 
     SubShader
@@ -55,13 +49,9 @@ Shader "Custom/Waves"
                 half _Glossiness;
                 half _Metallic;
 
-                float4 _Wave1;
-                float4 _Wave2;
-                float4 _Wave3;
-
-                float4 _Direction1;
-                float4 _Direction2;
-                float4 _Direction3;
+                float4 _WaveA;
+                float4 _WaveB;
+                float4 _WaveC;
             CBUFFER_END
 
             struct Attributes
@@ -80,60 +70,106 @@ Shader "Custom/Waves"
                 half fogFactor : TEXCOORD3;
             };
 
-            float CalculateWave(
-                float3 positionOS,
-                float4 wave,
-                float2 direction,
-                out float2 gradient)
-            {
-                float amplitude = wave.x;
-                float wavelength = max(wave.y, 0.001);
-                float speed = wave.z;
+            // float CalculateWave(
+            //     float3 positionOS,
+            //     float4 wave,
+            //     float2 direction,
+            //     out float2 gradient)
+            // {
+            //     float amplitude = wave.x;
+            //     float wavelength = max(wave.y, 0.001);
+            //     float speed = wave.z;
 
-                float2 dir = normalize(direction);
+            //     float2 dir = normalize(direction);
+
+            //     float k = 2.0 * PI / wavelength;
+
+            //     float phase = k * (dot(dir, positionOS.xz) - speed * _Time.y);
+
+            //     float height = amplitude * sin(phase);
+
+            //     gradient = amplitude * k * cos(phase) * dir;
+
+            //     return height;
+            // }
+            
+            float3 GerstnerWave(
+                float4 wave,
+                float3 position,
+                inout float3 tangent,
+                inout float3 binormal)
+            {
+                float steepness = wave.z;
+                float wavelength = max(wave.w, 0.001);
 
                 float k = 2.0 * PI / wavelength;
+                float c = sqrt(9.8 / k);
 
-                float phase = k * (dot(dir, positionOS.xz) - speed * _Time.y);
+                float2 direction = normalize(wave.xy);
 
-                float height = amplitude * sin(phase);
+                float phase = k * (
+                    dot(direction, position.xz) - c * _Time.y
+                );
 
-                gradient = amplitude * k * cos(phase) * dir;
+                float amplitude = steepness / k;
 
-                return height;
+                float s = sin(phase);
+                float co = cos(phase);
+
+                // Accumulate tangent
+                tangent += float3(
+                    -direction.x * direction.x * steepness * s,
+                    direction.x * steepness * co,
+                    -direction.x * direction.y * steepness * s
+                );
+
+                // Accumulate binormal
+                binormal += float3(
+                    -direction.x * direction.y * steepness * s,
+                    direction.y * steepness * co,
+                    -direction.y * direction.y * steepness * s
+                );
+
+                // Return Gerstner displacement
+                return float3(
+                    direction.x * amplitude * co,
+                    amplitude * s,
+                    direction.y * amplitude * co
+                );
             }
 
             Varyings vert(Attributes IN)
             {
                 Varyings OUT;
 
-                float3 position = IN.positionOS.xyz;
+                float3 gridPoint = IN.positionOS.xyz;
 
-                float2 gradient1;
-                float2 gradient2;
-                float2 gradient3;
+                // Start with zero derivatives for wave accumulation
+                float3 tangent = float3(0, 0, 0);
+                float3 binormal = float3(0, 0, 0);
 
-                // Calculate individual waves
-                float wave1 = CalculateWave(
-                    position, _Wave1, _Direction1.xy, gradient1
+                float3 position = gridPoint;
+
+                // Accumulate three Gerstner waves
+                position += GerstnerWave(
+                    _WaveA, gridPoint, tangent, binormal
                 );
 
-                float wave2 = CalculateWave(
-                    position, _Wave2, _Direction2.xy, gradient2
+                position += GerstnerWave(
+                    _WaveB, gridPoint, tangent, binormal
                 );
 
-                float wave3 = CalculateWave(
-                    position, _Wave3, _Direction3.xy, gradient3
+                position += GerstnerWave(
+                    _WaveC, gridPoint, tangent, binormal
                 );
 
-                // Combine wave heights
-                position.y += wave1 + wave2 + wave3;
+                // Add flat surface derivatives once
+                tangent += float3(1, 0, 0);
+                binormal += float3(0, 0, 1);
 
-                // Combine gradients to calculate the surface normal
-                float2 totalGradient = gradient1 + gradient2 + gradient3;
-
+                // Calculate surface normal
                 float3 normalOS = normalize(
-                    float3(-totalGradient.x, 1.0, -totalGradient.y)
+                    cross(binormal, tangent)
                 );
 
                 VertexPositionInputs positionInputs =
@@ -151,7 +187,6 @@ Shader "Custom/Waves"
 
                 return OUT;
             }
-
 
             half4 frag(Varyings IN) : SV_Target
             {
